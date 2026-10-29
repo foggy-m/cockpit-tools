@@ -2026,6 +2026,70 @@ mod tests {
     }
 
     #[test]
+    fn continuation_rollout_counts_fully_when_root_missing() {
+        let dir = make_temp_dir("codex-usage-continuation-orphan");
+        let db_path = dir.join("usage.sqlite");
+        let home = dir.join("home");
+        let sessions = home.join("sessions").join("2026").join("07").join("10");
+        // Only the continuation exists; the root rollout is absent, so there is nothing to
+        // dedup against and the turn must still be counted (not dropped).
+        let child =
+            sessions.join(format!("rollout-2026-07-10T03-10-00-{PARENT_ID}_{CHILD_ID}.jsonl"));
+        write_jsonl(
+            &child,
+            &[
+                session_meta_at(PARENT_ID, None, "2026-07-10T03:10:00Z"),
+                turn_context("gpt-5.4"),
+                token_count_with_last(1_400, 0, 35, 400, 0, 15, "codex", "2026-07-10T03:10:05Z"),
+            ],
+        );
+
+        let store = SessionUsageStore::open_path(db_path);
+        let instances = vec![UsageInstance {
+            id: DEFAULT_INSTANCE_ID.to_string(),
+            name: DEFAULT_INSTANCE_NAME.to_string(),
+            data_dir: home,
+        }];
+        let sync = store.sync(false, &instances).unwrap();
+        assert_eq!(sync.imported, 1);
+        let report = store.query(&CodexSessionUsageQuery::default()).unwrap();
+        assert_eq!(report.totals.input_tokens, 400);
+        assert_eq!(report.totals.request_count, 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn genuine_filename_meta_mismatch_is_still_deferred() {
+        let dir = make_temp_dir("codex-usage-mismatch");
+        let db_path = dir.join("usage.sqlite");
+        let home = dir.join("home");
+        let sessions = home.join("sessions").join("2026").join("07").join("10");
+        // Single-UUID filename whose id disagrees with session_meta.id and is not a
+        // root_leaf continuation: still treated as corrupt and dropped.
+        let file = sessions.join(format!("rollout-2026-07-10T03-00-00-{PARENT_ID}.jsonl"));
+        write_jsonl(
+            &file,
+            &[
+                session_meta(CHILD_ID),
+                turn_context("gpt-5.4"),
+                token_count_with_last(1_400, 0, 35, 400, 0, 15, "codex", "2026-07-10T03:00:02Z"),
+            ],
+        );
+
+        let store = SessionUsageStore::open_path(db_path);
+        let instances = vec![UsageInstance {
+            id: DEFAULT_INSTANCE_ID.to_string(),
+            name: DEFAULT_INSTANCE_NAME.to_string(),
+            data_dir: home,
+        }];
+        let sync = store.sync(false, &instances).unwrap();
+        assert_eq!(sync.imported, 0);
+        let report = store.query(&CodexSessionUsageQuery::default()).unwrap();
+        assert_eq!(report.totals.request_count, 0);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn incremental_sync_does_not_double_count_unchanged_files() {
         let dir = make_temp_dir("codex-usage-incr");
         let db_path = dir.join("usage.sqlite");
